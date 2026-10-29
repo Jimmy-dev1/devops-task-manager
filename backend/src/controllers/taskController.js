@@ -1,10 +1,15 @@
 const Task = require('../models/taskModel');
+const { isValidTaskId, validateTask } = require('../validation');
 
 const createTask = async (req, res) => {
   try {
-    const { title, description } = req.body;
-    // req.user.id comes directly from the authMiddleware
-    const task = await Task.createTask(req.user.id, title, description);
+    const { title, description } = req.body || {};
+    const validationError = validateTask({ title, description });
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
+
+    const task = await Task.createTask(req.user.id, title.trim(), description?.trim() || null);
     res.status(201).json(task);
   } catch (error) {
     console.error('Error creating task:', error);
@@ -25,7 +30,14 @@ const getTasks = async (req, res) => {
 const updateTaskStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status } = req.body || {};
+    if (!isValidTaskId(id)) {
+      return res.status(400).json({ message: 'Invalid task ID' });
+    }
+    if (!['pending', 'completed'].includes(status)) {
+      return res.status(400).json({ message: 'Status must be pending or completed' });
+    }
+
     const task = await Task.updateTask(id, req.user.id, status);
     if (!task) {
       return res.status(404).json({ message: 'Task not found or unauthorized' });
@@ -40,6 +52,10 @@ const updateTaskStatus = async (req, res) => {
 const deleteTask = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidTaskId(id)) {
+      return res.status(400).json({ message: 'Invalid task ID' });
+    }
+
     const task = await Task.deleteTask(id, req.user.id);
     if (!task) {
       return res.status(404).json({ message: 'Task not found or unauthorized' });

@@ -1,36 +1,28 @@
-const express = require('express');
-const cors = require('cors');
 require('dotenv').config();
 
+const app = require('./app');
 const db = require('./config/db');
-const authRoutes = require('./routes/authRoutes'); // Added import
-const taskRoutes = require('./routes/taskRoutes');
 
-const app = express();
-
-// Middleware setup
-app.use(cors());
-app.use(express.json());
-
-// Apply routes
-app.use('/api/auth', authRoutes); // Added route setup
-app.use('/api/tasks', taskRoutes);
-
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'success', message: 'Task Manager API is running!' });
-});
-
-// Test database connection
-db.query('SELECT NOW()', (err, res) => {
-  if (err) {
-    console.error('Error connecting to the database', err.stack);
-  } else {
-    console.log('Database connected successfully at:', res.rows[0].now);
+const start = async () => {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (typeof jwtSecret !== 'string' || Buffer.byteLength(jwtSecret, 'utf8') < 32) {
+    throw new Error('JWT_SECRET must be set to at least 32 UTF-8 bytes');
   }
-});
 
-const PORT = process.env.PORT || 5000;
+  await db.query('SELECT 1');
 
-app.listen(PORT, () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-});
+  const port = Number(process.env.PORT || 5000);
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Task Manager API listening on port ${port}`);
+  });
+};
+
+if (require.main === module) {
+  start().catch(async (error) => {
+    console.error('API startup failed:', error);
+    await db.end();
+    process.exitCode = 1;
+  });
+}
+
+module.exports = start;

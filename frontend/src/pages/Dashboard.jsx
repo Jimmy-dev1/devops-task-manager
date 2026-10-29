@@ -1,127 +1,323 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import API from '../api';
+
+const formatDate = (date) => new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+}).format(new Date(date));
 
 const Dashboard = () => {
   const [tasks, setTasks] = useState([]);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [busyTaskId, setBusyTaskId] = useState(null);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
-    // Check if user is logged in
-    const token = localStorage.getItem('token');
-    if (!token) {
-      navigate('/login');
-      return;
-    }
-    fetchTasks();
+    let active = true;
+    API.get('/tasks')
+      .then((response) => {
+        if (active) setTasks(response.data);
+      })
+      .catch((fetchError) => {
+        if (fetchError.response?.status === 401) {
+          navigate('/login');
+        } else if (active) {
+          setError('We could not load your tasks. Please try again.');
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
   }, [navigate]);
 
-  const fetchTasks = async () => {
+  const completedCount = tasks.filter((task) => task.status === 'completed').length;
+  const pendingCount = tasks.length - completedCount;
+  const completionRate = tasks.length ? Math.round((completedCount / tasks.length) * 100) : 0;
+
+  const visibleTasks = useMemo(() => tasks.filter((task) => {
+    const matchesFilter = filter === 'all' || task.status === filter;
+    const searchableText = `${task.title} ${task.description || ''}`.toLowerCase();
+    return matchesFilter && searchableText.includes(query.trim().toLowerCase());
+  }), [filter, query, tasks]);
+
+  const handleCreateTask = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    setNotice('');
     try {
-      const response = await API.get('/tasks');
-      setTasks(response.data);
-    } catch (error) {
-      console.error('Failed to fetch tasks', error);
-      if (error.response?.status === 401) {
-        localStorage.removeItem('token');
+      const response = await API.post('/tasks', { title, description });
+      setTitle('');
+      setDescription('');
+      setTasks((currentTasks) => [response.data, ...currentTasks]);
+      setNotice('Your task has been added.');
+    } catch (requestError) {
+      if (requestError.response?.status === 401) {
         navigate('/login');
+      } else {
+        setError(requestError.response?.data?.message || 'Could not add this task.');
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleUpdateStatus = async (task) => {
+    const status = task.status === 'pending' ? 'completed' : 'pending';
+    setBusyTaskId(task.id);
+    setError('');
+    try {
+      const response = await API.put(`/tasks/${task.id}`, { status });
+      setTasks((currentTasks) => currentTasks.map((item) => (
+        item.id === task.id ? response.data : item
+      )));
+    } catch (requestError) {
+      if (requestError.response?.status === 401) {
+        navigate('/login');
+      } else {
+        setError(requestError.response?.data?.message || 'Could not update this task.');
+      }
+    } finally {
+      setBusyTaskId(null);
+    }
+  };
+
+  const handleDelete = async (taskId) => {
+    setBusyTaskId(taskId);
+    setError('');
+    setNotice('');
+    try {
+      await API.delete(`/tasks/${taskId}`);
+      setTasks((currentTasks) => currentTasks.filter((task) => task.id !== taskId));
+      setNotice('Task deleted.');
+    } catch (requestError) {
+      if (requestError.response?.status === 401) {
+        navigate('/login');
+      } else {
+        setError(requestError.response?.data?.message || 'Could not delete this task.');
+      }
+    } finally {
+      setBusyTaskId(null);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await API.post('/auth/logout');
+      navigate('/login');
+    } catch (requestError) {
+      if (requestError.response?.status === 401) {
+        navigate('/login');
+      } else {
+        setError('Could not sign out. Please try again.');
       }
     }
   };
 
-  const handleCreateTask = async (e) => {
-    e.preventDefault();
-    try {
-      await API.post('/tasks', { title, description });
-      setTitle(''); // Clear the input field
-      setDescription('');
-      fetchTasks(); // Refresh the list from the database
-    } catch (error) {
-      console.error('Failed to create task', error);
-    }
-  };
-
-  const handleUpdateStatus = async (id, currentStatus) => {
-    const newStatus = currentStatus === 'pending' ? 'completed' : 'pending';
-    try {
-      await API.put(`/tasks/${id}`, { status: newStatus });
-      fetchTasks();
-    } catch (error) {
-      console.error('Failed to update task status', error);
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await API.delete(`/tasks/${id}`);
-      fetchTasks();
-    } catch (error) {
-      console.error('Failed to delete task', error);
-    }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    navigate('/login');
-  };
-
   return (
-    <div style={{ padding: '20px', maxWidth: '600px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Task Dashboard</h2>
-        <button onClick={handleLogout} style={{ padding: '5px 10px' }}>Logout</button>
-      </div>
+    <div className="dashboard-shell">
+      <aside className="sidebar">
+        <a className="brand" href="/" aria-label="Taskflow home">
+          <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
+          <span>taskflow<span className="brand-period">.</span></span>
+        </a>
 
-      <form onSubmit={handleCreateTask} style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ccc' }}>
-        <h3>New Task</h3>
-        <div style={{ marginBottom: '10px' }}>
-          <input
-            type="text"
-            placeholder="Task Title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            required
-            style={{ width: '95%', padding: '8px' }}
-          />
-        </div>
-        <div style={{ marginBottom: '10px' }}>
-          <textarea
-            placeholder="Task Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            style={{ width: '95%', padding: '8px', minHeight: '60px' }}
-          />
-        </div>
-        <button type="submit" style={{ padding: '8px 15px' }}>Add Task</button>
-      </form>
+        <p className="sidebar-label">WORKSPACE</p>
+        <nav className="sidebar-nav" aria-label="Main navigation">
+          <a className="nav-link nav-link-active" href="#overview"><span className="nav-icon">⌂</span> Overview</a>
+          <a className="nav-link" href="#tasks"><span className="nav-icon">▤</span> My tasks <span className="nav-count">{pendingCount}</span></a>
+        </nav>
 
-      <div>
-        <h3>Your Tasks</h3>
-        {tasks.length === 0 ? <p>No tasks found.</p> : (
-          <ul style={{ listStyleType: 'none', padding: 0 }}>
-            {tasks.map(task => (
-              <li key={task.id} style={{ border: '1px solid #eee', padding: '15px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="sidebar-tip">
+          <span className="tip-spark">✦</span>
+          <p className="tip-title">Small steps add up.</p>
+          <p>Keep your focus on what matters today.</p>
+        </div>
+
+        <button className="sidebar-logout" type="button" onClick={handleLogout}>
+          <span className="nav-icon">↗</span> Sign out
+        </button>
+      </aside>
+
+      <main className="dashboard-main" id="overview">
+        <header className="topbar">
+          <span className="breadcrumb">Workspace <span>/</span> Overview</span>
+          <div className="topbar-user"><span className="avatar">Y</span><span>Your workspace</span></div>
+        </header>
+
+        <div className="dashboard-content">
+          <section className="welcome-row">
+            <div>
+              <p className="eyebrow">YOUR PERSONAL WORKSPACE</p>
+              <h1>Make room for <span>great work.</span></h1>
+              <p className="welcome-copy">A clear plan turns busy days into meaningful progress.</p>
+            </div>
+            <a className="primary-link" href="#new-task"><span aria-hidden="true">＋</span> Create a task</a>
+          </section>
+
+          {(error || notice) && (
+            <div className={`feedback-banner${error ? ' feedback-error' : ''}`} role={error ? 'alert' : 'status'}>
+              <span>{error || notice}</span>
+              <button type="button" aria-label="Dismiss message" onClick={() => { setError(''); setNotice(''); }}>×</button>
+            </div>
+          )}
+
+          <section className="stats-grid" aria-label="Task summary">
+            <article className="stat-card stat-card-total">
+              <div className="stat-card-heading"><span>Total tasks</span><span className="stat-icon">▤</span></div>
+              <p className="stat-number">{tasks.length}</p>
+              <p className="stat-caption">Everything on your list</p>
+            </article>
+            <article className="stat-card">
+              <div className="stat-card-heading"><span>To do</span><span className="stat-icon stat-icon-warm">◷</span></div>
+              <p className="stat-number">{pendingCount}</p>
+              <p className="stat-caption">One step at a time</p>
+            </article>
+            <article className="stat-card">
+              <div className="stat-card-heading"><span>Completed</span><span className="stat-icon stat-icon-green">✓</span></div>
+              <p className="stat-number">{completedCount}</p>
+              <p className="stat-caption">{completionRate}% of your tasks</p>
+              <div className="progress-track" aria-label={`${completionRate}% complete`}>
+                <span style={{ width: `${completionRate}%` }} />
+              </div>
+            </article>
+          </section>
+
+          <section className="work-grid">
+            <form className="create-card" id="new-task" onSubmit={handleCreateTask}>
+              <div className="section-heading">
                 <div>
-                  <h4 style={{ margin: '0 0 5px 0', textDecoration: task.status === 'completed' ? 'line-through' : 'none' }}>
-                    {task.title}
-                  </h4>
-                  <p style={{ margin: 0, fontSize: '14px', color: '#555' }}>{task.description}</p>
+                  <p className="eyebrow">CAPTURE AN IDEA</p>
+                  <h2>New task</h2>
                 </div>
+                <span className="create-icon" aria-hidden="true">＋</span>
+              </div>
+              <label htmlFor="task-title">Task name</label>
+              <input
+                id="task-title"
+                type="text"
+                placeholder="e.g. Prepare project update"
+                value={title}
+                maxLength={255}
+                onChange={(event) => setTitle(event.target.value)}
+                required
+              />
+              <label htmlFor="task-description">A few details <span className="optional-label">OPTIONAL</span></label>
+              <textarea
+                id="task-description"
+                placeholder="Add context to help you get started..."
+                value={description}
+                maxLength={5000}
+                onChange={(event) => setDescription(event.target.value)}
+                rows={4}
+              />
+              <button className="submit-task" type="submit" disabled={saving || !title.trim()}>
+                {saving ? 'Adding task…' : 'Add to my list'} <span aria-hidden="true">→</span>
+              </button>
+            </form>
+
+            <section className="tasks-panel" id="tasks">
+              <div className="tasks-panel-heading">
                 <div>
-                  <button onClick={() => handleUpdateStatus(task.id, task.status)} style={{ marginRight: '10px', padding: '5px 10px' }}>
-                    {task.status === 'pending' ? 'Complete' : 'Undo'}
-                  </button>
-                  <button onClick={() => handleDelete(task.id)} style={{ backgroundColor: '#ff4c4c', color: 'white', border: 'none', padding: '5px 10px' }}>
-                    Delete
-                  </button>
+                  <p className="eyebrow">STAY ON TRACK</p>
+                  <h2>Your tasks <span className="heading-count">{tasks.length}</span></h2>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+                <div className="search-wrap">
+                  <span aria-hidden="true">⌕</span>
+                  <input
+                    aria-label="Search tasks"
+                    type="search"
+                    placeholder="Search tasks"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="task-filters" role="group" aria-label="Filter tasks">
+                {[
+                  ['all', 'All tasks'],
+                  ['pending', 'To do'],
+                  ['completed', 'Completed'],
+                ].map(([value, label]) => (
+                  <button
+                    className={filter === value ? 'filter-button filter-active' : 'filter-button'}
+                    type="button"
+                    key={value}
+                    aria-pressed={filter === value}
+                    onClick={() => setFilter(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {loading ? (
+                <div className="empty-state"><span className="loading-dot" /> Loading your tasks…</div>
+              ) : visibleTasks.length === 0 ? (
+                <div className="empty-state">
+                  <span className="empty-icon" aria-hidden="true">{query ? '⌕' : '✦'}</span>
+                  <h3>{query || filter !== 'all' ? 'No matching tasks' : 'A fresh start'}</h3>
+                  <p>
+                    {query || filter !== 'all'
+                      ? 'Try another search or choose a different filter.'
+                      : 'Add a task to turn your next idea into progress.'}
+                  </p>
+                </div>
+              ) : (
+                <ul className="task-list">
+                  {visibleTasks.map((task) => (
+                    <li className={`task-item${task.status === 'completed' ? ' task-completed' : ''}`} key={task.id}>
+                      <button
+                        className="task-check"
+                        type="button"
+                        aria-label={task.status === 'completed' ? `Reopen ${task.title}` : `Complete ${task.title}`}
+                        disabled={busyTaskId === task.id}
+                        onClick={() => handleUpdateStatus(task)}
+                      >
+                        {task.status === 'completed' ? '✓' : ''}
+                      </button>
+                      <div className="task-detail">
+                        <h3>{task.title}</h3>
+                        {task.description && <p>{task.description}</p>}
+                        <span className="task-date">Added {formatDate(task.created_at)}</span>
+                      </div>
+                      <span className={`task-status${task.status === 'completed' ? ' status-complete' : ''}`}>
+                        {task.status === 'completed' ? 'Done' : 'In progress'}
+                      </span>
+                      <button
+                        className="task-delete"
+                        type="button"
+                        aria-label={`Delete ${task.title}`}
+                        disabled={busyTaskId === task.id}
+                        onClick={() => handleDelete(task.id)}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {!loading && tasks.length > 0 && (
+                <p className="list-footer">Showing {visibleTasks.length} of {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}</p>
+              )}
+            </section>
+          </section>
+        </div>
+      </main>
     </div>
   );
 };

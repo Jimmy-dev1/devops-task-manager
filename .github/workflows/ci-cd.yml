@@ -1,40 +1,148 @@
-name: CI/CD Pipeline to AWS
+name: CI and deployment
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
+  verify:
     runs-on: ubuntu-latest
-
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-database-password
+          POSTGRES_DB: taskmanager
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d taskmanager"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_USER: taskmanager_app
+      DB_HOST: localhost
+      DB_NAME: taskmanager
+      DB_PASSWORD: ci-only-app-database-password
+      DB_PORT: 5432
+      DB_ADMIN_USER: postgres
+      DB_ADMIN_PASSWORD: ci-only-database-password
+      JWT_SECRET: ci-only-jwt-secret-at-least-32-characters-long
+      APP_ORIGIN: http://localhost:5173
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-    - name: Deploy to AWS EC2 via SSH
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.AWS_HOST }}
-        username: ${{ secrets.AWS_USER }}
-        key: ${{ secrets.AWS_SSH_KEY }}
-        script: |
-          # Install Docker and Docker Compose on EC2 if not present
-          if ! command -v docker &> /dev/null; then
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Verify migrations against the previous schema
+        working-directory: backend
+        run: |
+          PGPASSWORD="$DB_ADMIN_PASSWORD" psql --host localhost --username "$DB_ADMIN_USER" --dbname "$DB_NAME" <<'SQL'
+          CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE tasks (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            title VARCHAR(255) NOT NULL,
+            description TEXT,
+            status VARCHAR(50) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          INSERT INTO users (email, password_hash) VALUES ('migration@example.com', 'test-hash');
+          INSERT INTO tasks (user_id, title, status)
+          VALUES (1, 'Existing task', 'in-progress');
+          SQL
+          npm run init-db
+          npm run init-db
+          status="$(PGPASSWORD="$DB_ADMIN_PASSWORD" psql --host localhost --username "$DB_ADMIN_USER" --dbname "$DB_NAME" --tuples-only --no-align --command "SELECT status FROM tasks WHERE title = 'Existing task'")"
+          test "$status" = "pending"
+          superuser="$(PGPASSWORD="$DB_ADMIN_PASSWORD" psql --host localhost --username "$DB_ADMIN_USER" --dbname "$DB_NAME" --tuples-only --no-align --command "SELECT rolsuper FROM pg_roles WHERE rolname = 'taskmanager_app'")"
+          test "$superuser" = "f"
+
+      - name: Verify restricted application database access
+        working-directory: backend
+        run: |
+          node -e 'const db = require("./src/config/db"); db.query("SELECT status FROM tasks WHERE title = $1", ["Existing task"]).then(({ rows }) => { if (rows[0]?.status !== "pending") process.exitCode = 1; }).catch((error) => { console.error(error); process.exitCode = 1; }).finally(() => db.end());'
+
+      - name: Test backend
+        working-directory: backend
+        run: npm test
+
+      - name: Audit backend dependencies
+        working-directory: backend
+        run: npm audit --audit-level=high
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build backend container
+        run: docker build --tag devops-task-manager-backend:ci ./backend
+
+      - name: Build frontend container
+        run: docker build --tag devops-task-manager-frontend:ci ./frontend
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to AWS over SSH
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USER }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          script: |
+            set -eu
+            repo_dir="$HOME/devops-task-manager"
+
+            if ! command -v docker >/dev/null 2>&1; then
               sudo apt-get update
               sudo apt-get install -y docker.io docker-compose-v2
-              sudo usermod -aG docker $USER
-          fi
+            fi
 
-          # Clone repository or pull latest updates
-          if [ -d "/home/${{ secrets.AWS_USER }}/devops-task-manager" ]; then
-              cd /home/${{ secrets.AWS_USER }}/devops-task-manager
-              git pull origin main
-          else
-              git clone https://github.com/Jimmy-dev1/devops-task-manager.git /home/${{ secrets.AWS_USER }}/devops-task-manager
-              cd /home/${{ secrets.AWS_USER }}/devops-task-manager
-          fi
+            if [ -d "$repo_dir/.git" ]; then
+              cd "$repo_dir"
+              git pull --ff-only origin main
+            elif [ ! -e "$repo_dir" ]; then
+              git clone https://github.com/Jimmy-dev1/devops-task-manager.git "$repo_dir"
+              cd "$repo_dir"
+            else
+              echo "Deployment path exists but is not a Git checkout: $repo_dir" >&2
+              exit 1
+            fi
 
-          # Bring down old containers and build/start new ones with Nginx proxy
-          sudo docker compose down
-          sudo docker compose up -d --build
+            sudo docker compose up -d --build --remove-orphans
+            sudo docker compose rm --force migrator
