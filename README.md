@@ -1,6 +1,6 @@
 # DevOps Task Manager
 
-A containerized task manager built to demonstrate a complete React, Express, and PostgreSQL application with authenticated APIs, schema migrations, automated checks, and an SSH-based deployment workflow.
+A containerized task manager built to demonstrate a complete React, Express, and PostgreSQL application with authenticated APIs, schema migrations, automated checks, and an AWS Systems Manager (SSM)-based deployment workflow.
 
 ## Stack
 
@@ -68,7 +68,7 @@ Terminate HTTPS at a trusted load balancer or reverse proxy before exposing the 
 
 The API receives only the `taskmanager_app` credentials, which have data access to the `users` and `tasks` tables but cannot create roles, databases, or schema objects. The separate `migrator` service receives the PostgreSQL administrator credentials only while applying migrations. For an existing PostgreSQL volume from the earlier Compose configuration, the database password stored in that volume is not changed by editing `.env`; set `POSTGRES_PASSWORD` to the current database password before the first upgrade, then rotate the database password deliberately after the migration if needed.
 
-The GitHub Actions workflow runs backend tests, validates migrations against a previous-schema fixture, audits dependencies, lints/builds the frontend, and builds both production images for pull requests and pushes to `main`. Deployment runs only after those checks pass and requires the `AWS_HOST`, `AWS_USER`, and `AWS_SSH_KEY` repository secrets. The target host must already have a correctly configured `.env` file in the checked-out project directory. The workflow updates the deployment without explicitly stopping the stack first; this is not a zero-downtime deployment guarantee.
+The GitHub Actions workflow runs backend tests, validates migrations against a previous-schema fixture, audits dependencies, lints/builds the frontend, and builds both production images for pull requests and pushes to `main`. Deployment runs only after those checks pass and uses GitHub OIDC to assume the AWS role identified by the `AWS_ROLE_ARN` repository secret, then sends the deployment script to the configured EC2 managed node through Systems Manager Run Command. The role trust policy should restrict access to this repository's `main` branch, and its permissions should be limited to the deployment instance and required Systems Manager operations. The EC2 instance must be online in Systems Manager and have the appropriate instance profile; no inbound SSH access is required for workflow deployment. The target host must already have a correctly configured `.env` file in `/home/ubuntu/devops-task-manager`. The workflow updates the deployment without explicitly stopping the stack first; this is not a zero-downtime deployment guarantee.
 
 ## Security and data notes
 
